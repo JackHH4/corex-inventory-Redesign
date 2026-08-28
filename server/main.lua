@@ -972,7 +972,9 @@ AddEventHandler('playerDropped', function()
 end)
 
 RegisterNetEvent('corex-inventory:server:load', function()
-    LoadInventory(source)
+    local src = source
+    LoadInventory(src)
+    if SyncCashItemFromMoney then SyncCashItemFromMoney(src) end
 end)
 
 RegisterNetEvent('corex-inventory:server:requestDroppedItems', function()
@@ -981,6 +983,8 @@ end)
 
 RegisterNetEvent('corex-inventory:server:open', function()
     local src = source
+    if not Inventories[src] then LoadInventory(src) end
+    if SyncCashItemFromMoney then SyncCashItemFromMoney(src) end
     local inv = Inventories[src]
 
     if inv then
@@ -2203,6 +2207,7 @@ RegisterNetEvent('corex-inventory:server:purchaseVehicleShopItem', function(shop
     end
 
     local plate = GenerateRentalPlate()
+    local itemName = GetPortableVehicleItemName(catalog, vehicleDef)
     PendingVehiclePurchases[src] = {
         shopName = shopName,
         catalogId = NormalizeVehicleKey(catalogId),
@@ -2210,9 +2215,18 @@ RegisterNetEvent('corex-inventory:server:purchaseVehicleShopItem', function(shop
         label = vehicleDef.label or model,
         price = price,
         currency = currency,
-        itemName = GetPortableVehicleItemName(catalog, vehicleDef),
+        itemName = itemName,
         plate = plate,
         expiresAt = GetGameTimer() + 15000
+    }
+
+    -- Register early so finalizePortableVehicle never races before spawnSucceeded
+    PendingBikeRegistration[src] = {
+        plate = plate,
+        catalogId = NormalizeVehicleKey(catalogId),
+        model = NormalizeVehicleKey(model),
+        label = vehicleDef.label or model,
+        itemName = itemName
     }
 
     TriggerClientEvent('corex-inventory:client:spawnPurchasedVehicle', src, {
@@ -2293,14 +2307,28 @@ RegisterNetEvent('corex-inventory:server:finalizePortableVehicle', function(netI
     local vcoords = GetEntityCoords(entity)
     if not pcoords or not vcoords then return end
 
-    local maxDistance = (Config.PortableVehicles and Config.PortableVehicles.RegisterDistance) or 18.0
+    local maxDistance = (Config.PortableVehicles and Config.PortableVehicles.RegisterDistance) or 25.0
     if #(pcoords - vcoords) > maxDistance then return end
 
     local player = GetPlayer(src)
     if not player then return end
 
     local pending = PendingBikeRegistration[src]
-    if not pending then return end
+    -- Race fix: spawnSucceeded may arrive after finalize; build pending from entity
+    if not pending then
+        local plateText = NormalizePlate(GetVehicleNumberPlateText(entity))
+        local modelHash = GetEntityModel(entity)
+        local okHash, modelKey = IsPortableVehicleModelHash(nil, modelHash)
+        pending = {
+            plate = plateText,
+            catalogId = 'bike_rental',
+            model = modelKey or '',
+            label = modelKey or plateText,
+            itemName = (Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'
+        }
+        -- Prefer rental_bicycle for bikes when model looks like catalog bike - keep portable_vehicle default
+        PendingBikeRegistration[src] = pending
+    end
 
     local catalogId = NormalizeVehicleKey(pending.catalogId or 'bike_rental')
     local isAllowed, modelFromHash = IsPortableVehicleModelHash(catalogId, GetEntityModel(entity))
@@ -2351,6 +2379,9 @@ RegisterNetEvent('corex-inventory:server:finalizePortableVehicle', function(netI
         state:set('corexRentalBikeModel', modelKey, true)
     end
 
+    -- Ensure bags exist on all clients; confirm to registering client
+    TriggerClientEvent('corex-inventory:client:portableVehicleRegistered', src, netId)
+
     PendingBikeRegistration[src] = nil
     PendingBikeRefund[src] = nil
     DeployRefundToken[src] = nil
@@ -2390,14 +2421,32 @@ RegisterNetEvent('corex-inventory:server:pickupPortableVehicle', function(netId,
     local state = Entity(entity).state
     local owner = state.corexPortableVehicleOwner or state.corexRentalBikeOwner
     local plate = state.corexPortableVehiclePlate or state.corexRentalBikePlate or NormalizePlate(GetVehicleNumberPlateText(entity))
-    local catalogId = NormalizeVehicleKey(state.corexPortableVehicleCatalog or 'bike_rental')
+    local catalogId = NormalizeVehicleKey(state.corexPortableVehicleCatalog or state.corexRentalBikeCatalog or 'bike_rental')
     local model = NormalizeVehicleKey(state.corexPortableVehicleModel or state.corexRentalBikeModel)
     local label = state.corexPortableVehicleLabel or model
     local itemName = state.corexPortableVehicleItem or ((catalogId == 'bike_rental') and 'rental_bicycle' or ((Config.PortableVehicles and Config.PortableVehicles.ItemName) or 'portable_vehicle'))
 
+    -- Fallback: state bags not ready yet — allow owner claim if player is close and portable enabled
     if type(owner) ~= 'string' or owner == '' then
-        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
-        return
+        local defaultPortable = true
+        if Config.PortableVehicles and Config.PortableVehicles.DefaultPortable == false then
+            defaultPortable = false
+        end
+        if defaultPortable and Config.PortableVehicles and Config.PortableVehicles.Enabled ~= false then
+            owner = player.identifier
+            if not model or model == '' then
+                local okHash, modelKey = IsPortableVehicleModelHash(catalogId, GetEntityModel(entity))
+                model = modelKey or NormalizeVehicleKey(tostring(GetEntityModel(entity)))
+            end
+            label = label or model
+            -- bikes from bike_rental use rental_bicycle item
+            if catalogId == 'bike_rental' then
+                itemName = 'rental_bicycle'
+            end
+        else
+            TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
+            return
+        end
     end
 
     if owner ~= player.identifier then
@@ -2405,9 +2454,19 @@ RegisterNetEvent('corex-inventory:server:pickupPortableVehicle', function(netId,
         return
     end
 
+    if not model or model == '' then
+        local okHash, modelKey = IsPortableVehicleModelHash(catalogId, GetEntityModel(entity))
+        model = modelKey
+    end
+
     if not model or not IsPortableVehicleModel(catalogId, model) then
-        TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
-        return
+        -- last resort when RequireCatalogMatch is false: accept any model string
+        if not (Config.PortableVehicles and Config.PortableVehicles.RequireCatalogMatch == true) and model and model ~= '' then
+            -- ok
+        else
+            TriggerClientEvent('corex-inventory:client:portableVehicleNotify', src, 'This vehicle cannot be picked up.', 'error')
+            return
+        end
     end
 
     local meta = {
@@ -2904,4 +2963,163 @@ end)
 
 RegisterNetEvent('corex-inventory:server:compactStacksOnly', function()
     CompactStacks(source)
+end)
+
+
+-- =============================================================================
+-- SPLIT STACK
+-- =============================================================================
+local function SplitInventoryItem(src, slotId, amount)
+    local inv = Inventories[src]
+    if not inv or not inv.items then return false, 'No inventory' end
+
+    amount = math.floor(tonumber(amount) or 0)
+    if amount < 1 then return false, 'Invalid amount' end
+
+    local item = FindInventoryItem(inv, nil, slotId)
+    if not item then
+        item = FindInventoryItem(inv, nil, tostring(slotId))
+    end
+    if not item then return false, 'Item not found' end
+
+    local total = tonumber(item.count) or 1
+    if total <= 1 then return false, 'Cannot split single item' end
+    if amount >= total then return false, 'Amount too high' end
+
+    local data = GetItemData(item.name)
+    if not data then return false, 'Unknown item' end
+    if data.stackable == false then return false, 'Item is not stackable' end
+
+    local md = item.metadata
+    if type(md) == 'table' and (md.uid or md.plate or md.serial or md.unique == true) then
+        return false, 'Unique item cannot be split'
+    end
+
+    local pos = FindFreeSpot(inv, item.name)
+    if not pos then return false, 'No free space' end
+
+    item.count = total - amount
+
+    local newMeta = {}
+    if type(md) == 'table' then
+        for k, v in pairs(md) do
+            if k ~= 'uid' and k ~= 'serial' and k ~= 'plate' then
+                newMeta[k] = v
+            end
+        end
+    end
+
+    table.insert(inv.items, {
+        name = item.name,
+        count = amount,
+        x = pos.x,
+        y = pos.y,
+        slot = NextSlotId(),
+        metadata = newMeta
+    })
+
+    SaveInventory(src)
+    TriggerClientEvent('corex-inventory:client:update', src, inv)
+    return true
+end
+
+RegisterNetEvent('corex-inventory:server:split', function(slotId, amount, itemName)
+    local src = source
+    if slotId == nil then return end
+    local ok, err = SplitInventoryItem(src, slotId, amount)
+    if not ok then
+        TriggerClientEvent('corex-inventory:client:notify', src, err or 'Split failed', 'error')
+    end
+end)
+
+
+-- =============================================================================
+-- CASH AS PHYSICAL ITEM (Bottle Caps)
+-- Mirrors corex-core money.cash into inventory item "cash"
+-- =============================================================================
+local function CashItemName()
+    return (Config.CashAsItem and Config.CashAsItem.ItemName) or 'cash'
+end
+
+local function CashAsItemEnabled()
+    return Config.CashAsItem and Config.CashAsItem.Enabled ~= false
+end
+
+local function CountCashItems(src)
+    local inv = Inventories[src]
+    if not inv or not inv.items then return 0 end
+    local name = string.lower(CashItemName())
+    local total = 0
+    for _, it in ipairs(inv.items) do
+        if type(it.name) == 'string' and string.lower(it.name) == name then
+            total = total + (tonumber(it.count) or 0)
+        end
+    end
+    return total
+end
+
+function SyncCashItemFromMoney(src)
+    if not CashAsItemEnabled() then return end
+    local player = GetPlayer(src)
+    if not player then return end
+
+    local moneyCash = 0
+    if player.money and player.money.cash ~= nil then
+        moneyCash = math.floor(tonumber(player.money.cash) or 0)
+    end
+    moneyCash = math.max(0, moneyCash)
+
+    local inv = Inventories[src]
+    if not inv then return end
+
+    local itemName = CashItemName()
+    if not GetItemData(itemName) then
+        Debug('Warn', 'CashAsItem: item not in items.lua: ' .. tostring(itemName))
+        return
+    end
+
+    local current = CountCashItems(src)
+    if current == moneyCash then return end
+
+    -- remove existing cash stacks
+    local i = 1
+    local lname = string.lower(itemName)
+    while i <= #inv.items do
+        local it = inv.items[i]
+        if type(it.name) == 'string' and string.lower(it.name) == lname then
+            table.remove(inv.items, i)
+        else
+            i = i + 1
+        end
+    end
+
+    if moneyCash > 0 then
+        local pos = FindFreeSpot(inv, itemName)
+        if not pos then pos = { x = 1, y = 1 } end
+        table.insert(inv.items, {
+            name = itemName,
+            count = moneyCash,
+            x = pos.x,
+            y = pos.y,
+            slot = NextSlotId(),
+            metadata = {}
+        })
+    end
+
+    local w = 0
+    for _, it in ipairs(inv.items) do
+        local d = GetItemData(it.name)
+        if d then w = w + (d.weight or 0) * (tonumber(it.count) or 1) end
+    end
+    inv.weight = w
+    SaveInventory(src)
+    TriggerClientEvent('corex-inventory:client:update', src, inv)
+end
+
+RegisterNetEvent('corex-inventory:server:syncCash', function()
+    SyncCashItemFromMoney(source)
+end)
+
+exports('SyncCashItem', function(src)
+    SyncCashItemFromMoney(src)
 end)

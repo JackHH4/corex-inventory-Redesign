@@ -1122,6 +1122,8 @@ RegisterNetEvent('corex-inventory:client:spawnPurchasedVehicle', function(payloa
     Corex.Functions.Notify(label .. ' is ready.', 'success', 2500)
 
     TriggerEvent('corex-inventory:internal:registerPortableVehicleNet', vehicle)
+    -- Mark immediately so ox_target works before state bags replicate
+    TriggerEvent('corex-inventory:internal:markLocalPortable', vehicle)
 end)
 
 exports('OpenShop', OpenShop)
@@ -1134,6 +1136,10 @@ exports('SetActiveRentalVehicle', function(vehicle)
         DeleteVehicle(activeRentalVehicle)
     end
     activeRentalVehicle = vehicle
+end)
+
+exports('GetActiveRentalVehicle', function()
+    return activeRentalVehicle
 end)
 
 exports('ClearActiveRentalVehicleIfMatches', function(entity)
@@ -1238,4 +1244,25 @@ end)
 RegisterNUICallback('sortAndStack', function(_, cb)
     cb('ok')
     TriggerServerEvent('corex-inventory:server:sortAndStack')
+end)
+
+
+RegisterNUICallback('splitItem', function(data, cb)
+    cb('ok')
+    if type(data) ~= 'table' then return end
+    local slot = data.slot or data.slotId
+    local amount = tonumber(data.count) or tonumber(data.amount)
+    if slot == nil or not amount then return end
+    TriggerServerEvent('corex-inventory:server:split', slot, amount, data.name)
+end)
+
+RegisterNetEvent('corex-inventory:client:notify', function(msg, nType)
+    if GetResourceState('corex-core') == 'started' then
+        pcall(function()
+            local Corex = exports['corex-core']:GetCoreObject()
+            if Corex and Corex.Functions and Corex.Functions.Notify then
+                Corex.Functions.Notify(tostring(msg), nType or 'error', 3500)
+            end
+        end)
+    end
 end)

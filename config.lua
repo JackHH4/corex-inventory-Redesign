@@ -30,6 +30,14 @@ Config.PropSyncInterval = 10000
 Config.MarkerCacheInterval = 100
 
 -- Portable vehicle system (ox_target pickup -> inventory item -> deploy)
+-- Sync corex-core money.cash <-> inventory item "cash" (physical bottle caps)
+Config.CashAsItem = {
+    Enabled = true,
+    ItemName = 'cash',
+    -- When true, shops/vehicle purchases prefer removing cash ITEMS first, then core money
+    PreferItem = true
+}
+
 Config.PortableVehicles = {
     Enabled = true,
     ItemName = 'portable_vehicle',

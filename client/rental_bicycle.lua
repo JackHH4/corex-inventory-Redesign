@@ -38,6 +38,30 @@ RegisterNetEvent('corex-inventory:client:rentalBikeNotify', function(message, ty
     Notify(message, typ)
 end)
 
+-- Local cache of vehicles this client registered as portable (covers state-bag delay)
+LocalPortableVehicles = LocalPortableVehicles or {}
+
+local function MarkLocalPortable(vehicle)
+    if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+        LocalPortableVehicles[vehicle] = true
+    end
+end
+
+local function IsLocalPortable(vehicle)
+    if not vehicle or vehicle == 0 then return false end
+    if LocalPortableVehicles[vehicle] then return true end
+    return false
+end
+
+RegisterNetEvent('corex-inventory:client:portableVehicleRegistered', function(netId)
+    netId = tonumber(netId)
+    if not netId or netId == 0 then return end
+    local ent = NetworkGetEntityFromNetworkId(netId)
+    if ent and ent ~= 0 then
+        MarkLocalPortable(ent)
+    end
+end)
+
 local function LoadVehicleModel(model)
     if Corex and Corex.Functions and Corex.Functions.LoadModel then
         return Corex.Functions.LoadModel(model, 5000)
@@ -238,6 +262,10 @@ local function RegisterPortableVehicleNetworked(vehicle)
     end)
 end
 
+AddEventHandler('corex-inventory:internal:markLocalPortable', function(vehicle)
+    MarkLocalPortable(vehicle)
+end)
+
 AddEventHandler('corex-inventory:internal:registerPortableVehicleNet', function(vehicle)
     if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return end
     RegisterPortableVehicleNetworked(vehicle)
@@ -360,22 +388,47 @@ CreateThread(function()
         Wait(500)
     end
 
+    local pickupDist = (Config.PortableVehicles and Config.PortableVehicles.PickupDistance) or 4.5
+
     exports.ox_target:addGlobalVehicle({
         {
             name = 'corex_pickup_portable_vehicle',
             icon = 'fa-solid fa-box-open',
             label = 'Pick up vehicle',
-            distance = 3.0,
+            distance = pickupDist,
             canInteract = function(entity)
                 if not entity or entity == 0 or not DoesEntityExist(entity) then return false end
+                if Config.PortableVehicles and Config.PortableVehicles.Enabled == false then return false end
                 local ped = PlayerPedId()
                 if GetVehiclePedIsIn(ped, false) ~= 0 then return false end
+
                 local st = Entity(entity).state
-                return st.corexPortableVehicleOwner ~= nil or st.corexRentalBikeOwner ~= nil
+                if st.corexPortableVehicleOwner ~= nil or st.corexRentalBikeOwner ~= nil then
+                    return true
+                end
+
+                -- Fallback while state bags still replicating / race after shop spawn
+                if IsLocalPortable(entity) then
+                    return true
+                end
+
+                local active = nil
+                pcall(function()
+                    active = exports['corex-inventory']:GetActiveRentalVehicle()
+                end)
+                if active and active == entity then
+                    return true
+                end
+                return false
             end,
             onSelect = function(data)
                 local entity = data.entity
+                if not entity or entity == 0 then return end
                 local netId = NetworkGetNetworkIdFromEntity(entity)
+                if not netId or netId == 0 then
+                    Notify('Vehicle is not networked yet. Wait a moment.', 'error')
+                    return
+                end
                 local props = CaptureVehicleProps(entity)
                 TriggerServerEvent('corex-inventory:server:pickupPortableVehicle', netId, props)
             end,

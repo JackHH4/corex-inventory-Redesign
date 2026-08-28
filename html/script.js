@@ -1548,9 +1548,7 @@ function hideContextMenu() {
         slider.value   = val;
         numInput.value = val;
         takeEl.textContent   = val;
-        remainEl.textContent = currentMax + currentMin - val; // total - val for split; max - val + min for others
-        // For non-split modes where "remain" = total - taken:
-        remainEl.textContent = (Number(itemTotalEl.dataset.total) || currentMax) - val;
+        remainEl.textContent = Math.max(0, (Number(itemTotalEl.dataset.total) || currentMax) - val);
     }
 
     /**
@@ -1618,7 +1616,9 @@ function hideContextMenu() {
 
     // Convenience wrappers
     window.openSplitModal = function(item) {
-        const total = item.count || 1;
+        if (!item) return;
+        const total = Math.max(1, parseInt(item.count, 10) || 1);
+        if (total <= 1) return;
         openAmountModal({
             item,
             title:       'Split Item',
@@ -1631,9 +1631,18 @@ function hideContextMenu() {
             labelRemain: 'Sisa',
             labelTake:   'Dipisah',
             callback(amount) {
+                const n = Math.floor(Number(amount) || 0);
+                if (n < 1 || n >= total) return;
                 fetch(`https://${GetParentResourceName()}/splitItem`, {
                     method: 'POST',
-                    body: JSON.stringify({ name: item.name, count: amount, slot: item.slot })
+                    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+                    body: JSON.stringify({
+                        name: item.name,
+                        count: n,
+                        amount: n,
+                        slot: item.slot,
+                        slotId: item.slot
+                    })
                 }).catch(() => {});
             }
         });
